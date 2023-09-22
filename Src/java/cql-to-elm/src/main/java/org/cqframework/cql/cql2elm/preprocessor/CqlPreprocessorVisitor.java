@@ -6,6 +6,7 @@ import org.antlr.v4.runtime.tree.ParseTree;
 import org.antlr.v4.runtime.tree.TerminalNode;
 import org.cqframework.cql.cql2elm.*;
 import org.cqframework.cql.cql2elm.model.Model;
+import org.cqframework.cql.elm.tracking.Trackable;
 import org.cqframework.cql.gen.cqlLexer;
 import org.cqframework.cql.gen.cqlParser;
 import org.hl7.cql.model.*;
@@ -15,6 +16,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 public class CqlPreprocessorVisitor extends CqlPreprocesorElmCommonVisitor {
     static final Logger logger = LoggerFactory.getLogger(CqlPreprocessorVisitor.class);
@@ -254,15 +258,50 @@ public class CqlPreprocessorVisitor extends CqlPreprocesorElmCommonVisitor {
 
     @Override
     public Object visitFunctionDefinition(cqlParser.FunctionDefinitionContext ctx) {
+        final String functionName = parseString(ctx.identifierOrFunctionIdentifier());
         final PreCompileOutput preCompileOutput = preCompile(ctx);
         FunctionDefinitionInfo functionDefinition = new FunctionDefinitionInfo();
-        functionDefinition.setName(parseString(ctx.identifierOrFunctionIdentifier()));
+        functionDefinition.setName(functionName);
         functionDefinition.setContext(currentContext);
         functionDefinition.setDefinition(ctx);
         functionDefinition.setPreCompileOutput(preCompileOutput);
         processHeader(ctx, functionDefinition);
+
+        // LUKETODO:  merge in 1191
+//        final String translatorOptions = "";
+        final String translatorOptions = libraryBuilder.getCompilerOptions();
+
+        if (! translatorOptions.contains("EnableAnnotations") && ! translatorOptions.contains("EnableResultTypes")) {
+            final Iterable<FunctionDefinitionInfo> functionDefinitionInfos = libraryInfo.resolveFunctionReference(functionName);
+
+            if (functionDefinitionInfos != null) {
+                final List<PreCompileOutput> existingPreCompileOutputs = StreamSupport.stream(functionDefinitionInfos.spliterator(), false)
+                        .map(FunctionDefinitionInfo::getPreCompileOutput)
+                        .collect(Collectors.toList());
+
+                final Optional<PreCompileOutput> optMatchingExistingPreCompileOutput =
+                        existingPreCompileOutputs.stream().filter(existingPreCompileOutput -> existingPreCompileOutput.getFunctionDef().getOperand().size() == preCompileOutput.getFunctionDef().getOperand().size()).findFirst();
+
+                optMatchingExistingPreCompileOutput.ifPresent(matchingExistingPreCompileOutput -> {
+                    logger.error("Function name: {}, existing params: {}, passed params: {}", functionName, functionTypes(preCompileOutput), functionTypes(matchingExistingPreCompileOutput));
+//                    // LUKETODO:  This breaks a bunch of unit tests because this code applies to the libraries as wel
+                    throw new CqlCompilerException("Function overloading cannot be resolved due to compiler options for function: " + functionName);
+                });
+            }
+        }
+
         libraryInfo.addFunctionDefinition(functionDefinition);
         return functionDefinition;
+    }
+
+    private static List<String> functionTypes(PreCompileOutput preCompileOutput) {
+        return preCompileOutput.getFunctionDef()
+                .getOperand()
+                .stream()
+                .map(OperandDef::getOperandTypeSpecifier)
+                .map(Trackable::getResultType)
+                .map(Object::toString)
+                .collect(Collectors.toList());
     }
 
     @Override
